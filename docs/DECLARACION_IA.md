@@ -11,8 +11,8 @@ Se utilizó Gemini como asistente de apoyo técnico para la elaboración del pro
 
 
 2. ESTIMACIÓN Y PORCENTAJE DE USO DE IA
-Porcentaje de IA: 45%
-Porcentaje de Código/Autoría Propia: 55% (Lógica de negocio, diseño de arquitectura y desarrollo de estructuras de datos)
+Porcentaje de IA: 55%
+Porcentaje de Código/Autoría Propia: 45% (Lógica de negocio, diseño de arquitectura y desarrollo de estructuras de datos)
 
 
 
