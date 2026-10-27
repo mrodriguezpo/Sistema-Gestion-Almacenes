@@ -1,512 +1,479 @@
-#include "../include/WarehouseManager.hpp"
-#include <iostream>
+/**
+ * @file WarehouseManager.cpp
+ * @brief Implementación de la clase WarehouseManager para la gestión de logística de almacén.
+ * @details Administra las estructuras de datos principales: Max-Heap (cola de recepción),
+ *          Pila LIFO (rack de almacenamiento), Flota de Robots (Round-Robin) y la
+ *          persistencia en disco (CSV) mediante C++17.
+ */
+
+#include "WarehouseManager.hpp"
 #include <fstream>
 #include <sstream>
+#include <iostream>
+#include <algorithm>
 #include <cstdlib>
-#include <ctime>
-#include <chrono>
 #include <cstdio>
-#include <limits>
+#include <filesystem> // C++17: Para verificar y crear directorios automáticamente
 
-WarehouseManager::WarehouseManager(int cantidadRobots, int capacidadMaximaRack, int capMaxRobot) {
-    turnoRobotActual = 0;
-    reconfigurarParametros(cantidadRobots, capacidadMaximaRack, capMaxRobot);
-}
+namespace fs = std::filesystem;
 
 /**
- * @brief Escribe un evento en la bitácora de auditoría data/log_operaciones.txt con marca de tiempo.
+ * @brief Constructor de la clase WarehouseManager.
+ * @param cantidadRobots Número inicial de robots en la flota.
+ * @param capacidadMaximaRack Capacidad límite de almacenamiento del Rack.
+ * @param capMaxRobot Capacidad máxima de entregas por tanda de cada robot.
  */
-void WarehouseManager::registrarLog(const std::string& mensaje) const {
-    std::ofstream archivoLog("data/log_operaciones.txt", std::ios::app);
-    if (archivoLog.is_open()) {
-        auto ahora = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-        std::string marcaTiempo = std::ctime(&ahora);
-        if (!marcaTiempo.empty() && marcaTiempo.back() == '\n') {
-            marcaTiempo.pop_back();
-        }
-        archivoLog << "[" << marcaTiempo << "] " << mensaje << "\n";
-        archivoLog.close();
+WarehouseManager::WarehouseManager(int cantidadRobots, int capacidadMaximaRack, int capMaxRobot)
+    : turnoRobotActual(0), totalRobots(cantidadRobots), capacidadRack(capacidadMaximaRack), capacidadRobotDefault(capMaxRobot) {
+
+    // Inicialización e inserción de la flota robótica
+    for (int i = 1; i <= totalRobots; i++) {
+        Robot r;
+        r.nombre = "Robot-" + std::to_string(i);
+        r.capacidadMaxima = capacidadRobotDefault;
+        r.entregasActuales = 0;
+        r.entregasTotalesAcumuladas = 0;
+        r.estado = "Disponible";
+        flotaRobots.push_back(r);
     }
 }
 
 /**
- * @brief Búsqueda instantánea O(1) en la tabla Hash de IDs.
+ * @brief Verifica si un identificador numérico de pedido ya existe en el sistema.
+ * @param id Identificador a consultar.
+ * @return true si el ID ya fue registrado previamente; false en caso contrario.
  */
 bool WarehouseManager::existeID(int id) const {
     return idsExistentes.find(id) != idsExistentes.end();
 }
 
 /**
- * @brief Ajusta el vector de robots preservando el estado de los existentes.
+ * @brief Registra un nuevo pedido en la zona de recepción.
+ * @param id Identificador único del pedido.
+ * @param descripcion Detalle del contenido del paquete.
+ * @param prioridad Nivel de urgencia (1: Baja, 2: Media, 3: VIP/Crítica).
+ * @return true si la inserción fue exitosa; false si el ID ya existía.
  */
-void WarehouseManager::actualizarFlotaRobots(int nuevaCantidad, int nuevaCapacidadRobot) {
-    totalRobots = nuevaCantidad;
-    capacidadRobotDefault = nuevaCapacidadRobot;
+bool WarehouseManager::registrarPedido(int id, const std::string& descripcion, int prioridad) {
+    if (existeID(id)) return false;
 
-    std::vector<Robot> nuevaFlota;
-    for (int i = 1; i <= totalRobots; ++i) {
-        std::string nombreRobot = "Robot-" + std::to_string(i);
-        bool encontrado = false;
+    // Creación de la estructura Pedido e inserción en recepción, catálogo e índice
+    Pedido p{ id, descripcion, prioridad, "En Espera", "N/A" };
+    colaRecepcion.push(p);
+    catalogoGlobal.push_back(p);
+    idsExistentes.insert(id);
 
-        for (const auto& r : flotaRobots) {
-            if (r.nombre == nombreRobot) {
-                Robot copia = r;
-                copia.capacidadMaxima = nuevaCapacidadRobot;
-                nuevaFlota.push_back(copia);
-                encontrado = true;
-                break;
-            }
-        }
-        if (!encontrado) {
-            nuevaFlota.push_back({ nombreRobot, 0, nuevaCapacidadRobot, "Disponible" });
-        }
-    }
-    flotaRobots = nuevaFlota;
-    if (turnoRobotActual >= totalRobots) {
-        turnoRobotActual = 0;
-    }
-}
-
-void WarehouseManager::reconfigurarParametros(int nuevosRobots, int nuevaCapacidadRack, int nuevaCapacidadRobot) {
-    if (nuevosRobots > 0 && nuevaCapacidadRobot > 0) {
-        actualizarFlotaRobots(nuevosRobots, nuevaCapacidadRobot);
-    }
-    if (nuevaCapacidadRack > 0) {
-        if (rackAlmacenamiento.size() > static_cast<size_t>(nuevaCapacidadRack)) {
-            std::cout << "[!] ADVERTENCIA: La nueva capacidad del rack (" << nuevaCapacidadRack
-                << ") es menor que los paquetes actuales ("
-                << rackAlmacenamiento.size() << "). Liberar espacio antes de reducir.\n";
-        }
-        else {
-            capacidadRack = nuevaCapacidadRack;
-        }
-    }
-    std::cout << "-> Configuración actualizada: " << totalRobots << " Robots (Capacidad: "
-        << capacidadRobotDefault << " envios/robot) | Capacidad Rack: " << capacidadRack << " unidades.\n";
-    registrarLog("CONFIGURACION: " + std::to_string(totalRobots) + " Robots, Cap. Robot: "
-        + std::to_string(capacidadRobotDefault) + ", Cap. Rack: " + std::to_string(capacidadRack));
+    guardarEnCSV(); // Guarda inmediatamente en disco
+    return true;
 }
 
 /**
- * @brief Recarga selectiva: Solamente restablece a los robots en estado 'En Recarga'.
+ * @brief Evalúa si el almacenamiento de un paquete requiere confirmación por conflicto de prioridad.
+ * @param[out] prioEntrante Prioridad del paquete en la cima de la recepción.
+ * @param[out] prioCimaRack Prioridad del paquete en la cima del Rack.
+ * @return true si la prioridad del paquete entrante es menor que la del paquete en el Rack.
  */
-void WarehouseManager::recargarRobotsFueraDeServicio() {
-    int recargados = 0;
-    for (auto& r : flotaRobots) {
-        if (r.estado == "En Recarga") {
-            r.entregasActuales = 0;
-            r.estado = "Disponible";
-            recargados++;
-        }
-    }
+bool WarehouseManager::requiereAlertaInteligente(int& prioEntrante, int& prioCimaRack) const {
+    if (colaRecepcion.empty() || rackAlmacenamiento.empty()) return false;
 
-    if (recargados > 0) {
-        std::cout << "-> ¡Recarga completada! Se han rehabilitado " << recargados << " robot(s) agotado(s).\n";
-        registrarLog("RECARGA: " + std::to_string(recargados) + " robot(s) restablecido(s) a 'Disponible'.");
-    }
-    else {
-        std::cout << "-> No hay robots fuera de servicio en este momento.\n";
-    }
+    prioEntrante = colaRecepcion.top().prioridad;
+    prioCimaRack = rackAlmacenamiento.top().prioridad;
+
+    return (prioEntrante < prioCimaRack);
 }
 
 /**
- * @brief Registra un nuevo pedido ingresándolo en la Cola de Prioridad y la Tabla Hash O(1).
+ * @brief Traslada el paquete más urgente desde la recepción hacia el Rack LIFO.
+ * @param forzar Omite la advertencia de prioridad si se establece en true.
+ * @return true si la operación se completó con éxito; false si falla o se cancela.
  */
-void WarehouseManager::registrarPedido(int id, const std::string& descripcion, int prioridad) {
-    Pedido nuevoPedido = { id, descripcion, prioridad, "En Espera", "N/A" };
-    colaRecepcion.push(nuevoPedido);
-    catalogoGlobal.push_back(nuevoPedido);
-    idsExistentes.insert(id); // Registra en la tabla Hash para validación O(1)
+bool WarehouseManager::procesarAlmacenamiento(bool forzar) {
+    if (colaRecepcion.empty()) return false;
+    if (static_cast<int>(rackAlmacenamiento.size()) >= capacidadRack) return false;
 
-    std::cout << "-> Pedido #" << id << " registrado exitosamente en recepcion.\n";
-    registrarLog("REGISTRO: Pedido #" + std::to_string(id) + " (" + descripcion + ") Prio: " + std::to_string(prioridad));
-}
-
-/**
- * @brief Traslada el paquete de mayor prioridad desde la Cola de Recepción hacia la Pila del Rack.
- */
-void WarehouseManager::procesarAlmacenamiento() {
-    if (colaRecepcion.empty()) {
-        std::cout << "-> No hay pedidos en espera para almacenar.\n";
-        return;
+    int pEntrante = 0, pCima = 0;
+    if (!forzar && requiereAlertaInteligente(pEntrante, pCima)) {
+        return false;
     }
 
-    if (rackAlmacenamiento.size() >= static_cast<size_t>(capacidadRack)) {
-        std::cout << "-> ATENCION: El rack esta lleno. Capacidad maxima: " << capacidadRack << ".\n";
-        return;
-    }
-
-    Pedido paqueteEntrante = colaRecepcion.top();
-
-    // Verificación de prioridad para prevenir enterrar paquetes urgentes
-    if (!rackAlmacenamiento.empty()) {
-        Pedido paqueteEnCima = rackAlmacenamiento.top();
-        if (paqueteEnCima.prioridad > paqueteEntrante.prioridad) {
-            std::cout << "\n[!] ALERTA INTELIGENTE [!]\n";
-            std::cout << "Estas a punto de enterrar el pedido #" << paqueteEnCima.id
-                << " (Prioridad " << paqueteEnCima.prioridad
-                << ") debajo de un paquete de menor prioridad (" << paqueteEntrante.prioridad << ").\n";
-            std::cout << "¿Deseas continuar de todos modos? (s/n): ";
-
-            char confirmacion;
-            std::cin >> confirmacion;
-            std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-            if (confirmacion == 'n' || confirmacion == 'N') {
-                std::cout << "-> Operación cancelada por el operador.\n";
-                return;
-            }
-        }
-    }
-
+    // Extracción de la cola de recepción
+    Pedido p = colaRecepcion.top();
     colaRecepcion.pop();
-    paqueteEntrante.estado = "Almacenado";
-    paqueteEntrante.robotAsignado = "N/A";
-    rackAlmacenamiento.push(paqueteEntrante);
-    historialUndo.push(paqueteEntrante);
 
-    for (auto& p : catalogoGlobal) {
-        if (p.id == paqueteEntrante.id) {
-            p.estado = "Almacenado";
-            p.robotAsignado = "N/A";
+    // Actualización de estado y apilamiento en el Rack
+    p.estado = "Almacenado";
+    rackAlmacenamiento.push(p);
+    historialUndo.push(p);
+
+    // Sincronización con el catálogo global
+    for (auto& item : catalogoGlobal) {
+        if (item.id == p.id) {
+            item.estado = p.estado;
             break;
         }
     }
 
-    std::cout << "-> Pedido #" << paqueteEntrante.id << " trasladado al rack de almacenamiento.\n";
-    registrarLog("ALMACENAMIENTO: Pedido #" + std::to_string(paqueteEntrante.id) + " movido al Rack.");
+    guardarEnCSV();
+    return true;
 }
 
 /**
- * @brief Extrae el paquete superior del Rack y lo asigna al Robot en turno mediante la Cola Circular (Round-Robin).
+ * @brief Despacha el paquete en la cima del Rack hacia un robot disponible (Round-Robin).
+ * @return true si el paquete fue despachado exitosamente; false si no hay paquetes o robots libres.
  */
-void WarehouseManager::despacharARobot() {
-    if (rackAlmacenamiento.empty()) {
-        std::cout << "-> El rack esta vacio. No hay paquetes para despachar.\n";
-        return;
-    }
+bool WarehouseManager::despacharARobot() {
+    if (rackAlmacenamiento.empty() || flotaRobots.empty()) return false;
 
-    // Búsqueda del siguiente robot disponible con aritmética modular (Cola Circular)
+    // Búsqueda del siguiente robot disponible en el ciclo Round-Robin
     int intentos = 0;
     while (intentos < totalRobots && flotaRobots[turnoRobotActual].estado == "En Recarga") {
         turnoRobotActual = (turnoRobotActual + 1) % totalRobots;
         intentos++;
     }
 
-    if (intentos == totalRobots) {
-        std::cout << "\n[!] ALERTA DE FLOTA: Toda la flota (" << totalRobots << "/" << totalRobots
-            << " robots) esta 'En Recarga'.\n";
-        std::cout << "    Seleccione la opcion [11] para recargar los robots agotados.\n";
-        return;
-    }
+    if (flotaRobots[turnoRobotActual].estado == "En Recarga") return false;
 
-    Robot& robotSeleccionado = flotaRobots[turnoRobotActual];
-    Pedido paqueteListo = rackAlmacenamiento.top();
+    // Extracción del paquete de la cima del Rack
+    Pedido p = rackAlmacenamiento.top();
     rackAlmacenamiento.pop();
 
-    robotSeleccionado.entregasActuales++;
-    paqueteListo.estado = "Despachado";
-    paqueteListo.robotAsignado = robotSeleccionado.nombre;
+    // Asignación de carga y actualización del contador del robot
+    Robot& bot = flotaRobots[turnoRobotActual];
+    p.estado = "Despachado";
+    p.robotAsignado = bot.nombre;
 
-    // Verificación de límite de capacidad por robot
-    if (robotSeleccionado.entregasActuales >= robotSeleccionado.capacidadMaxima) {
-        robotSeleccionado.estado = "En Recarga";
-        std::cout << "-> Pedido #" << paqueteListo.id << " despachado con " << robotSeleccionado.nombre
-            << " [¡Alcanzo su limite de " << robotSeleccionado.capacidadMaxima
-            << " envios y paso a 'En Recarga'!]\n";
-    }
-    else {
-        std::cout << "-> Pedido #" << paqueteListo.id << " despachado con " << robotSeleccionado.nombre
-            << " (Carga actual: " << robotSeleccionado.entregasActuales << "/"
-            << robotSeleccionado.capacidadMaxima << ").\n";
+    bot.entregasActuales++;
+    bot.entregasTotalesAcumuladas++;
+    if (bot.entregasActuales >= bot.capacidadMaxima) {
+        bot.estado = "En Recarga";
     }
 
-    for (auto& p : catalogoGlobal) {
-        if (p.id == paqueteListo.id) {
-            p.estado = "Despachado";
-            p.robotAsignado = robotSeleccionado.nombre;
+    // Actualización de la entrada equivalente en el catálogo global
+    for (auto& item : catalogoGlobal) {
+        if (item.id == p.id) {
+            item.estado = p.estado;
+            item.robotAsignado = p.robotAsignado;
             break;
         }
     }
 
-    // Rotación circular al siguiente robot
+    // Rotación de turno al siguiente robot
     turnoRobotActual = (turnoRobotActual + 1) % totalRobots;
-    registrarLog("DESPACHO: Pedido #" + std::to_string(paqueteListo.id) + " entregado por " + robotSeleccionado.nombre);
+    guardarEnCSV();
+    return true;
 }
 
 /**
- * @brief Revierte la última operación de almacenamiento devolviendo el paquete a la cola de recepción.
+ * @brief Ejecuta múltiples despachos consecutivos en una sola llamada.
+ * @param cantidad Número de paquetes a despachar.
+ * @return Número total de paquetes efectivamente procesados.
  */
-void WarehouseManager::deshacerAccion() {
-    if (historialUndo.empty()) {
-        std::cout << "-> No hay acciones recientes para revertir.\n";
-        return;
+int WarehouseManager::despacharPorLotes(int cantidad) {
+    int procesados = 0;
+    for (int i = 0; i < cantidad; i++) {
+        if (despacharARobot()) procesados++;
+        else break;
     }
+    return procesados;
+}
 
-    Pedido ultimoMovimiento = historialUndo.top();
+/**
+ * @brief Deshace la última transferencia hacia el Rack, retornando el paquete a recepción.
+ * @return true si se logró deshacer la acción; false si la pila de undo está vacía.
+ */
+bool WarehouseManager::deshacerAccion() {
+    if (historialUndo.empty()) return false;
+    Pedido p = historialUndo.top();
     historialUndo.pop();
 
-    if (!rackAlmacenamiento.empty() && rackAlmacenamiento.top().id == ultimoMovimiento.id) {
+    // Verificación de coherencia en la cima del Rack
+    if (!rackAlmacenamiento.empty() && rackAlmacenamiento.top().id == p.id) {
         rackAlmacenamiento.pop();
+        p.estado = "En Espera";
+        colaRecepcion.push(p);
+
+        // Restauración en el catálogo global
+        for (auto& item : catalogoGlobal) {
+            if (item.id == p.id) {
+                item.estado = "En Espera";
+                item.robotAsignado = "N/A";
+                break;
+            }
+        }
+        guardarEnCSV();
+        return true;
     }
+    return false;
+}
 
-    ultimoMovimiento.estado = "En Espera";
-    ultimoMovimiento.robotAsignado = "N/A";
-    colaRecepcion.push(ultimoMovimiento);
+/**
+ * @brief Consulta el expediente de un pedido y calcula su nivel de profundidad en el Rack.
+ * @param id Identificador del pedido a rastrear.
+ * @param[out] pedidoEncontrado Estructura con la información copiada del pedido.
+ * @param[out] profundidadRack Distancia desde la cima del Rack (1 si está en la cima).
+ * @return true si el paquete existe; false en caso contrario.
+ */
+bool WarehouseManager::rastrearPedido(int id, Pedido& pedidoEncontrado, int& profundidadRack) const {
+    profundidadRack = -1;
+    bool encontrado = false;
 
-    for (auto& p : catalogoGlobal) {
-        if (p.id == ultimoMovimiento.id) {
-            p.estado = "En Espera";
-            p.robotAsignado = "N/A";
+    // Búsqueda del expediente en el catálogo global
+    for (const auto& item : catalogoGlobal) {
+        if (item.id == id) {
+            pedidoEncontrado = item;
+            encontrado = true;
             break;
         }
     }
 
-    std::cout << "-> Accion revertida: El pedido #" << ultimoMovimiento.id << " ha sido devuelto a recepcion.\n";
-    registrarLog("REVERSION (UNDO): Pedido #" + std::to_string(ultimoMovimiento.id) + " devuelto a recepcion.");
-}
+    if (!encontrado) return false;
 
-void WarehouseManager::rastrearPedido(int id) const {
-    if (!existeID(id)) {
-        std::cout << "-> Error: No se encontro ningun pedido registrado con el ID #" << id << ".\n";
-        return;
-    }
-
-    for (const auto& p : catalogoGlobal) {
-        if (p.id == id) {
-            std::cout << "\n===========================================================\n";
-            std::cout << "             RASTREO DE PEDIDO #" << id << "\n";
-            std::cout << "===========================================================\n";
-            std::cout << "Descripcion   : " << p.descripcion << "\n";
-            std::cout << "Prioridad     : " << p.prioridad << "\n";
-            std::cout << "Estado Actual : " << p.estado << "\n";
-
-            if (p.estado == "Despachado") {
-                std::cout << "Asignacion    : " << p.robotAsignado << "\n";
+    // Si el pedido está almacenado, recorre una copia temporal de la pila para hallar la profundidad
+    if (pedidoEncontrado.estado == "Almacenado") {
+        std::stack<Pedido> temp = rackAlmacenamiento;
+        int nivel = 1;
+        while (!temp.empty()) {
+            if (temp.top().id == id) {
+                profundidadRack = nivel;
+                break;
             }
-            else if (p.estado == "Almacenado") {
-                std::stack<Pedido> copiaRack = rackAlmacenamiento;
-                int posicion = 1;
-                while (!copiaRack.empty()) {
-                    if (copiaRack.top().id == id) {
-                        std::cout << "Ubicacion Rack: Posicion " << posicion << " desde la cima (LIFO)\n";
-                        break;
-                    }
-                    copiaRack.pop();
-                    posicion++;
-                }
-            }
-            std::cout << "===========================================================\n";
-            return;
+            temp.pop();
+            nivel++;
         }
     }
+
+    return true;
 }
 
+/**
+ * @brief Genera una cantidad de paquetes de prueba con IDs aleatorios de 4 dígitos.
+ * @param cantidad Número de paquetes simulados a crear.
+ */
 void WarehouseManager::generarCargaSimulada(int cantidad) {
-    if (cantidad <= 0) return;
-    std::srand(static_cast<unsigned int>(std::time(nullptr)));
-    int generados = 0;
-
-    while (generados < cantidad) {
-        int randomId = 1000 + (std::rand() % 9000);
-        if (!existeID(randomId)) { // Verificación en O(1)
-            int randomPrio = 1 + (std::rand() % 3);
-            std::string desc = "Paquete_Simulado_" + std::to_string(generados + 1);
-            registrarPedido(randomId, desc, randomPrio);
-            generados++;
+    int creados = 0;
+    while (creados < cantidad) {
+        int idAleatorio = 1000 + (rand() % 9000);
+        if (!existeID(idAleatorio)) {
+            int prio = (rand() % 3) + 1;
+            registrarPedido(idAleatorio, "Paquete Simulado #" + std::to_string(idAleatorio), prio);
+            creados++;
         }
     }
-    std::cout << "-> Generados " << cantidad << " pedidos aleatorios exitosamente.\n";
-    registrarLog("SIMULACION: Carga automatica de " + std::to_string(cantidad) + " pedidos.");
 }
 
-void WarehouseManager::mostrarDashboardKPI() const {
-    std::cout << "\n===========================================================\n";
-    std::cout << "             DASHBOARD DE METRICAS Y KPIS                  \n";
-    std::cout << "===========================================================\n";
+/**
+ * @brief Calcula el porcentaje de ocupación actual del Rack respecto a su capacidad máxima.
+ * @return Flotante representando el porcentaje (0.0f a 100.0f).
+ */
+float WarehouseManager::getPorcentajeOcupacionRack() const {
+    if (capacidadRack == 0) return 0.0f;
+    return (static_cast<float>(rackAlmacenamiento.size()) / capacidadRack) * 100.0f;
+}
 
-    int total = catalogoGlobal.size();
-    int enEspera = 0, almacenados = 0, despachados = 0;
-    int prio1 = 0, prio2 = 0, prio3 = 0;
-
+/**
+ * @brief Obtiene el desglose de paquetes por nivel de prioridad en el catálogo global.
+ * @param[out] prio1 Conteo de pedidos con prioridad Baja (1).
+ * @param[out] prio2 Conteo de pedidos con prioridad Media (2).
+ * @param[out] prio3 Conteo de pedidos con prioridad VIP (3).
+ */
+void WarehouseManager::getDistribucionPrioridades(int& prio1, int& prio2, int& prio3) const {
+    prio1 = 0; prio2 = 0; prio3 = 0;
     for (const auto& p : catalogoGlobal) {
-        if (p.estado == "En Espera") enEspera++;
-        else if (p.estado == "Almacenado") almacenados++;
-        else if (p.estado == "Despachado") despachados++;
-
         if (p.prioridad == 1) prio1++;
         else if (p.prioridad == 2) prio2++;
         else if (p.prioridad == 3) prio3++;
     }
-
-    double ocupacionRack = (capacidadRack > 0) ? (static_cast<double>(almacenados) / capacidadRack) * 100.0 : 0.0;
-
-    std::cout << "1. RESUMEN DE INVENTARIO:\n";
-    std::cout << "   - Total Pedidos Registrados : " << total << "\n";
-    std::cout << "   - En Fila de Recepcion      : " << enEspera << "\n";
-    std::cout << "   - En Rack de Almacenes      : " << almacenados << " / " << capacidadRack << " (" << ocupacionRack << "% Ocupacion)\n";
-    std::cout << "   - Despachados con Exito     : " << despachados << "\n\n";
-
-    std::cout << "2. DISTRIBUCION POR PRIORIDAD:\n";
-    std::cout << "   - Baja (1)     : " << prio1 << "\n";
-    std::cout << "   - Media (2)    : " << prio2 << "\n";
-    std::cout << "   - Critica (3)  : " << prio3 << "\n\n";
-
-    std::cout << "3. ESTADO Y CAPACIDAD DE LA FLOTA DE ROBOTS:\n";
-    for (const auto& r : flotaRobots) {
-        int conteoHistorico = 0;
-        for (const auto& p : catalogoGlobal) {
-            if (p.estado == "Despachado" && p.robotAsignado == r.nombre) conteoHistorico++;
-        }
-        std::cout << "   - " << r.nombre << ": " << r.entregasActuales << "/" << r.capacidadMaxima
-            << " cargas en turno [" << r.estado << "] | Total entregas: " << conteoHistorico << "\n";
-    }
-    std::cout << "===========================================================\n";
 }
 
-void WarehouseManager::despacharPorLotes(int cantidad) {
-    if (cantidad <= 0) {
-        std::cout << "-> Cantidad invalida.\n";
-        return;
-    }
-    if (rackAlmacenamiento.empty()) {
-        std::cout << "-> El rack esta vacio. No hay paquetes para despachar.\n";
-        return;
-    }
+/**
+ * @brief Reconfigura las restricciones físicas del sistema (robots y almacenamiento).
+ * @param nuevosRobots Nueva cantidad total de unidades en la flota.
+ * @param nuevaCapMaxRobot Nuevo límite de entregas por tanda por robot.
+ * @param nuevaCapMaxRack Nueva capacidad tope de la pila del Rack.
+ */
+void WarehouseManager::reconfigurarParametros(int nuevosRobots, int nuevaCapMaxRobot, int nuevaCapMaxRack) {
+    totalRobots = nuevosRobots;
+    capacidadRobotDefault = nuevaCapMaxRobot;
+    capacidadRack = nuevaCapMaxRack;
 
-    std::cout << "--- INICIANDO DESPACHO POR LOTES (" << cantidad << " unidades) ---\n";
-    int despachados = 0;
-    while (despachados < cantidad && !rackAlmacenamiento.empty()) {
-        int intentAntes = despachados;
-        despacharARobot();
-        if (intentAntes == despachados && !rackAlmacenamiento.empty() && flotaRobots[turnoRobotActual].estado == "En Recarga") {
-            break;
-        }
-        despachados++;
+    // Reestructuración completa de la flota robótica
+    flotaRobots.clear();
+    for (int i = 1; i <= totalRobots; i++) {
+        Robot r;
+        r.nombre = "Robot-" + std::to_string(i);
+        r.capacidadMaxima = capacidadRobotDefault;
+        r.entregasActuales = 0;
+        r.entregasTotalesAcumuladas = 0;
+        r.estado = "Disponible";
+        flotaRobots.push_back(r);
     }
-    std::cout << "-> Lote finalizado. Total procesados: " << despachados << " paquete(s).\n";
-    registrarLog("DESPACHO POR LOTES: Procesados " + std::to_string(despachados) + " pedidos.");
+    turnoRobotActual = 0;
+    guardarEnCSV();
 }
 
-void WarehouseManager::mostrarInventario() const {
-    std::cout << "\n===========================================================\n";
-    std::cout << "             CATALOGO GLOBAL DEL ALMACEN                   \n";
-    std::cout << "===========================================================\n";
-    std::cout << "Configuracion Actual: " << totalRobots << " Robots | Cap. Robot: " << capacidadRobotDefault
-        << " envios | Cap. Rack: " << capacidadRack << "\n";
-    std::cout << "-----------------------------------------------------------\n";
-
-    if (catalogoGlobal.empty()) {
-        std::cout << "El inventario esta completamente vacio.\n";
-    }
-    else {
-        for (const auto& p : catalogoGlobal) {
-            std::cout << "ID: " << p.id
-                << " | Desc: " << p.descripcion
-                << " | Prio: " << p.prioridad
-                << " | Estado: " << p.estado;
-
-            if (p.estado == "Despachado") std::cout << " [" << p.robotAsignado << "]";
-            std::cout << "\n";
+/**
+ * @brief Restablece los robots agotados ("En Recarga") a su estado "Disponible".
+ * @return Cantidad de robots que fueron recargados.
+ */
+int WarehouseManager::recargarRobotsFueraDeServicio() {
+    int recargados = 0;
+    for (auto& bot : flotaRobots) {
+        if (bot.estado == "En Recarga") {
+            bot.entregasActuales = 0;
+            bot.estado = "Disponible";
+            recargados++;
         }
     }
-    std::cout << "===========================================================\n";
+    return recargados;
 }
 
+/**
+ * @brief Limpia la memoria activa del almacén y elimina el archivo CSV de datos.
+ * @param rutaArchivo Ruta del archivo plano a eliminar de disco.
+ * @return true indicando que la memoria se vació e intentó eliminar el archivo.
+ */
+bool WarehouseManager::eliminarHistorialYCSV(const std::string& rutaArchivo) {
+    while (!colaRecepcion.empty()) colaRecepcion.pop();
+    while (!rackAlmacenamiento.empty()) rackAlmacenamiento.pop();
+    while (!historialUndo.empty()) historialUndo.pop();
+    catalogoGlobal.clear();
+    idsExistentes.clear();
+
+    for (auto& bot : flotaRobots) {
+        bot.entregasActuales = 0;
+        bot.entregasTotalesAcumuladas = 0;
+        bot.estado = "Disponible";
+    }
+
+    std::remove(rutaArchivo.c_str());
+    return true;
+}
+
+/**
+ * @brief Serializa y escribe el catálogo de inventario y configuración en un archivo CSV.
+ * @details Crea de manera automática la carpeta 'data/' si no existe previa en el disco.
+ * @param rutaArchivo Ruta de destino del archivo CSV.
+ */
 void WarehouseManager::guardarEnCSV(const std::string& rutaArchivo) {
-    std::ofstream archivo(rutaArchivo);
-    if (!archivo.is_open()) {
-        std::cout << "-> Error: No se pudo abrir el archivo '" << rutaArchivo << "'.\n";
-        return;
+    try {
+        fs::path pathObj(rutaArchivo);
+        if (pathObj.has_parent_path()) {
+            fs::create_directories(pathObj.parent_path()); // Crea la carpeta 'data/' si no existe
+        }
     }
+    catch (...) {}
 
-    archivo << "CONFIG," << totalRobots << "," << capacidadRack << "," << capacidadRobotDefault << "\n";
-    archivo << "ID,Descripcion,Prioridad,Estado,RobotAsignado\n";
+    std::ofstream archivo(rutaArchivo);
+    if (!archivo.is_open()) return;
 
+    // Escritura de la cabecera de configuración y metadatos
+    archivo << "#CONFIG," << totalRobots << "," << capacidadRobotDefault << "," << capacidadRack << "\n";
+    archivo << "id,descripcion,prioridad,estado,robotAsignado\n";
+
+    // Escritura secuencial de cada registro en el catálogo
     for (const auto& p : catalogoGlobal) {
         archivo << p.id << "," << p.descripcion << "," << p.prioridad << "," << p.estado << "," << p.robotAsignado << "\n";
     }
-
     archivo.close();
-    std::cout << "-> Datos guardados exitosamente en '" << rutaArchivo << "'.\n";
-    registrarLog("PERSISTENCIA: Datos guardados en " + rutaArchivo);
 }
 
+/**
+ * @brief Carga y deserializa el inventario y configuración desde un archivo CSV.
+ * @param rutaArchivo Ruta del archivo CSV a leer.
+ * @return true si el archivo existe y pudo procesarse; false si no se encontró.
+ */
 bool WarehouseManager::cargarDesdeCSV(const std::string& rutaArchivo) {
     std::ifstream archivo(rutaArchivo);
     if (!archivo.is_open()) return false;
 
     std::string linea;
+    while (!colaRecepcion.empty()) colaRecepcion.pop();
+    while (!rackAlmacenamiento.empty()) rackAlmacenamiento.pop();
+    while (!historialUndo.empty()) historialUndo.pop();
     catalogoGlobal.clear();
     idsExistentes.clear();
-
-    if (std::getline(archivo, linea)) {
-        if (linea.rfind("CONFIG,", 0) == 0) {
-            std::stringstream ss(linea);
-            std::string tag, numRobotsStr, capRackStr, capRobotStr;
-            std::getline(ss, tag, ',');
-            std::getline(ss, numRobotsStr, ',');
-            std::getline(ss, capRackStr, ',');
-
-            int capRobot = 3;
-            if (std::getline(ss, capRobotStr, ',')) {
-                capRobot = std::stoi(capRobotStr);
-            }
-
-            reconfigurarParametros(std::stoi(numRobotsStr), std::stoi(capRackStr), capRobot);
-            std::getline(archivo, linea);
-        }
-    }
 
     while (std::getline(archivo, linea)) {
         if (linea.empty()) continue;
 
-        std::stringstream ss(linea);
-        std::string idStr, desc, prioStr, estado, robot;
+        // Procesamiento de metadatos de configuración
+        if (linea.rfind("#CONFIG", 0) == 0) {
+            std::stringstream ss(linea);
+            std::string tag, sRobots, sCapBot, sCapRack;
+            std::getline(ss, tag, ',');
+            std::getline(ss, sRobots, ',');
+            std::getline(ss, sCapBot, ',');
+            std::getline(ss, sCapRack, ',');
 
-        if (std::getline(ss, idStr, ',') &&
-            std::getline(ss, desc, ',') &&
-            std::getline(ss, prioStr, ',') &&
-            std::getline(ss, estado, ',')) {
+            if (!sRobots.empty()) totalRobots = std::stoi(sRobots);
+            if (!sCapBot.empty()) capacidadRobotDefault = std::stoi(sCapBot);
+            if (!sCapRack.empty()) capacidadRack = std::stoi(sCapRack);
 
-            if (!std::getline(ss, robot, ',')) robot = "N/A";
-
-            int idNum = std::stoi(idStr);
-            Pedido p = { idNum, desc, std::stoi(prioStr), estado, robot };
-            catalogoGlobal.push_back(p);
-            idsExistentes.insert(idNum);
-
-            if (p.estado == "En Espera") colaRecepcion.push(p);
-            else if (p.estado == "Almacenado") rackAlmacenamiento.push(p);
+            flotaRobots.clear();
+            for (int i = 1; i <= totalRobots; i++) {
+                Robot r;
+                r.nombre = "Robot-" + std::to_string(i);
+                r.capacidadMaxima = capacidadRobotDefault;
+                flotaRobots.push_back(r);
+            }
+            continue;
         }
-    }
 
+        if (linea.rfind("id,", 0) == 0) continue;
+
+        // Extracción de cada campo del pedido mediante comas
+        std::stringstream ss(linea);
+        std::string sId, desc, sPrio, estado, robot;
+        std::getline(ss, sId, ',');
+        std::getline(ss, desc, ',');
+        std::getline(ss, sPrio, ',');
+        std::getline(ss, estado, ',');
+        std::getline(ss, robot, ',');
+
+        if (sId.empty()) continue;
+
+        Pedido p;
+        p.id = std::stoi(sId);
+        p.descripcion = desc;
+        p.prioridad = std::stoi(sPrio);
+        p.estado = estado;
+        p.robotAsignado = robot;
+
+        catalogoGlobal.push_back(p);
+        idsExistentes.insert(p.id);
+
+        // Reconstrucción de la cola Max-Heap y Pila LIFO según su estado guardado
+        if (estado == "En Espera") colaRecepcion.push(p);
+        else if (estado == "Almacenado") rackAlmacenamiento.push(p);
+    }
     archivo.close();
-    std::cout << "\n-> ¡Historial cargado con exito! Pedidos importados: " << catalogoGlobal.size() << "\n";
-    mostrarInventario();
-    registrarLog("PERSISTENCIA: Historial cargado desde " + rutaArchivo);
     return true;
 }
 
-bool WarehouseManager::borrarArchivoCSV(const std::string& rutaArchivo) {
-    if (std::remove(rutaArchivo.c_str()) == 0) {
-        while (!colaRecepcion.empty()) colaRecepcion.pop();
-        while (!rackAlmacenamiento.empty()) rackAlmacenamiento.pop();
-        while (!historialUndo.empty()) historialUndo.pop();
-        catalogoGlobal.clear();
-        idsExistentes.clear();
-
-        for (auto& r : flotaRobots) {
-            r.entregasActuales = 0;
-            r.estado = "Disponible";
-        }
-        turnoRobotActual = 0;
-
-        std::cout << "-> El archivo '" << rutaArchivo << "' ha sido eliminado y el inventario reiniciado a cero.\n";
-        registrarLog("PERSISTENCIA: Archivo '" + rutaArchivo + "' eliminado y sistema reiniciado.");
-        return true;
+/**
+ * @brief Exporta una copia de la cola de recepción ordenada en formato vector.
+ * @return Vector conteniendo los pedidos en recepción en orden de prioridad.
+ */
+std::vector<Pedido> WarehouseManager::getColaRecepcionVector() const {
+    std::priority_queue<Pedido> temp = colaRecepcion;
+    std::vector<Pedido> res;
+    while (!temp.empty()) {
+        res.push_back(temp.top());
+        temp.pop();
     }
-    else {
-        std::cout << "-> No se pudo eliminar el archivo '" << rutaArchivo << "'.\n";
-        return false;
+    return res;
+}
+
+/**
+ * @brief Exporta una copia del Rack de almacenamiento en formato vector.
+ * @return Vector conteniendo los pedidos ordenados desde la cima hacia el fondo.
+ */
+std::vector<Pedido> WarehouseManager::getRackVector() const {
+    std::stack<Pedido> temp = rackAlmacenamiento;
+    std::vector<Pedido> res;
+    while (!temp.empty()) {
+        res.push_back(temp.top());
+        temp.pop();
     }
+    return res;
 }

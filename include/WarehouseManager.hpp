@@ -1,91 +1,82 @@
-#ifndef WAREHOUSEMANAGER_HPP
-#define WAREHOUSEMANAGER_HPP
-
-#include "Pedido.hpp"
-#include <queue>
-#include <stack>
+#pragma once
 #include <vector>
 #include <string>
+#include <queue>
+#include <stack>
 #include <unordered_set>
+#include "Pedido.hpp"
 
-/**
- * @struct Robot
- * @brief Representa un agente físico de transporte con capacidad y autonomía finita.
- */
 struct Robot {
-    std::string nombre;                 // Nombre identificador (Ej: "Robot-1")
-    int entregasActuales = 0;          // Cantidad de envíos realizados en la tanda actual
-    int capacidadMaxima = 3;           // Límite máximo de envíos antes de requerir mantenimiento
-    std::string estado = "Disponible";  // Estado operativo: "Disponible" o "En Recarga"
+    std::string nombre;
+    int entregasActuales = 0;
+    int capacidadMaxima = 3;
+    int entregasTotalesAcumuladas = 0; // KPI acumulativo
+    std::string estado = "Disponible";  // "Disponible" o "En Recarga"
 };
 
-/**
- * @class WarehouseManager
- * @brief Controlador principal del sistema Smart Warehouse.
- * @details Administra las estructuras de datos, la lógica de negocio, la flota de robots y la persistencia en disco.
- */
 class WarehouseManager {
 private:
-    // --- ESTRUCTURAS DE DATOS PRINCIPALES ---
-    std::priority_queue<Pedido> colaRecepcion;  // Max-Heap: Ordena pedidos por prioridad (3: Crítica > 1: Baja)
-    std::stack<Pedido> rackAlmacenamiento;      // Pila LIFO: Simula el rack de almacenamiento vertical
-    std::stack<Pedido> historialUndo;            // Pila LIFO: Guarda el historial para la reversión de acciones
-    std::vector<Pedido> catalogoGlobal;          // Vector dinámico: Almacena la totalidad de pedidos registrados
-    std::vector<Robot> flotaRobots;              // Vector dinámico: Mantiene el estado de cada robot
+    std::priority_queue<Pedido> colaRecepcion;
+    std::stack<Pedido> rackAlmacenamiento;
+    std::stack<Pedido> historialUndo;
+    std::vector<Pedido> catalogoGlobal;
+    std::vector<Robot> flotaRobots;
+    std::unordered_set<int> idsExistentes;
 
-    // --- TABLA HASH PARA BÚSQUEDA RÁPIDA O(1) ---
-    std::unordered_set<int> idsExistentes;      // Conjunto Hash: Permite verificar la existencia de IDs en tiempo O(1)
-
-    // --- PARÁMETROS DEL SISTEMA ---
-    int turnoRobotActual;       // Índice del robot en turno para la distribución circular (Round-Robin)
-    int totalRobots;            // Cantidad total de robots configurados
-    int capacidadRack;          // Límite físico máximo de espacio en el rack
-    int capacidadRobotDefault;   // Límite de entregas predeterminado por robot
-
-    /**
-     * @brief Actualiza la flota de robots ante cambios de configuración manteniendo el estado previo.
-     */
-    void actualizarFlotaRobots(int nuevaCantidad, int nuevaCapacidadRobot);
+    int turnoRobotActual;
+    int totalRobots;
+    int capacidadRack;
+    int capacidadRobotDefault;
 
 public:
-    /**
-     * @brief Constructor con valores de configuración iniciales por defecto.
-     */
     WarehouseManager(int cantidadRobots = 3, int capacidadMaximaRack = 10, int capMaxRobot = 3);
 
-    /**
-     * @brief Verifica si un ID ya existe en el sistema.
-     * @return Complejidad temporal O(1) gracias a std::unordered_set.
-     */
+    // [1] Registrar Pedido
     bool existeID(int id) const;
+    bool registrarPedido(int id, const std::string& descripcion, int prioridad);
 
-    // --- OPERACIONES PRINCIPALES DEL ALMACÉN ---
-    void registrarPedido(int id, const std::string& descripcion, int prioridad);
-    void procesarAlmacenamiento();
-    void despacharARobot();
-    void deshacerAccion();
-    void reconfigurarParametros(int nuevosRobots, int nuevaCapacidadRack, int nuevaCapacidadRobot);
+    // [2] Almacenamiento + Alerta Inteligente
+    bool requiereAlertaInteligente(int& prioEntrante, int& prioCimaRack) const;
+    bool procesarAlmacenamiento(bool forzar = false);
 
-    // --- MANTENIMIENTO DE FLOTA ---
-    void recargarRobotsFueraDeServicio();
+    // [3] Despacho Individual & [4] Despacho por Lotes
+    bool despacharARobot();
+    int despacharPorLotes(int cantidad);
 
-    // --- REPORTES Y SIMULACIÓN ---
-    void rastrearPedido(int id) const;
+    // [5] Reversión (Undo)
+    bool deshacerAccion();
+
+    // [6] Tracking por ID
+    bool rastrearPedido(int id, Pedido& pedidoEncontrado, int& profundidadRack) const;
+
+    // [8] Simulación Aleatoria
     void generarCargaSimulada(int cantidad);
-    void mostrarDashboardKPI() const;
-    void despacharPorLotes(int cantidad);
-    void mostrarInventario() const;
-    void registrarLog(const std::string& mensaje) const;
 
-    // --- GETTERS DE CONFIGURACIÓN ---
+    // [9] Métricas KPI
+    float getPorcentajeOcupacionRack() const;
+    void getDistribucionPrioridades(int& prio1, int& prio2, int& prio3) const;
+
+    // [10] Configuración
+    void reconfigurarParametros(int nuevosRobots, int nuevaCapMaxRobot, int nuevaCapMaxRack);
+
+    // [11] Mantenimiento
+    int recargarRobotsFueraDeServicio();
+
+    // [12] Eliminar Historial
+    bool eliminarHistorialYCSV(const std::string& rutaArchivo = "data/inventario.csv");
+
+    // [13] Persistencia CSV
+    void guardarEnCSV(const std::string& rutaArchivo = "data/inventario.csv");
+    bool cargarDesdeCSV(const std::string& rutaArchivo = "data/inventario.csv");
+
+    // Getters auxiliares
     int getTotalRobots() const { return totalRobots; }
     int getCapacidadRack() const { return capacidadRack; }
     int getCapacidadRobotDefault() const { return capacidadRobotDefault; }
-
-    // --- MÓDULO DE PERSISTENCIA (CSV) ---
-    void guardarEnCSV(const std::string& rutaArchivo);
-    bool cargarDesdeCSV(const std::string& rutaArchivo);
-    bool borrarArchivoCSV(const std::string& rutaArchivo);
+    std::vector<Pedido> getColaRecepcionVector() const;
+    std::vector<Pedido> getRackVector() const;
+    const std::vector<Pedido>& getCatalogoGlobal() const { return catalogoGlobal; }
+    const std::vector<Robot>& getFlotaRobots() const { return flotaRobots; }
+    int getCantidadEnRecepcion() const { return static_cast<int>(colaRecepcion.size()); }
+    int getCantidadEnRack() const { return static_cast<int>(rackAlmacenamiento.size()); }
 };
-
-#endif // WAREHOUSEMANAGER_HPP
